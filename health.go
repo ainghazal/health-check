@@ -18,8 +18,10 @@ var (
 )
 
 type HealthService struct {
+	Name     string
 	Last     *MeasurementBatch
 	Previous *MeasurementBatch
+	Checker  Checker
 }
 
 // Healthy returns true if the passed address is known to be healthy. It will
@@ -36,8 +38,14 @@ func (hs *HealthService) Start() error {
 }
 
 func (hs *HealthService) RunBatch(ctx context.Context) {
-	// TODO implement me
-	log.Println("Running round...")
+	log.Printf("[+] %s: running round...", hs.Name)
+	ch := make(chan *Measurement)
+	go hs.Checker.Run(ch)
+	for m := range ch {
+		log.Println()
+		log.Println(">>>", m.Addr, "healthy:", m.Healthy)
+		log.Println()
+	}
 }
 
 // A MeasuremenMeasurementBatch is a round of measurements.
@@ -59,6 +67,8 @@ type Measurement struct {
 	// Recovered is intended to be set by the monitoring service, by
 	// comparing with the previous run.
 	Recovered bool
+	// Addr is the address we measured.
+	Addr net.Addr
 	// For metrics purposes.
 	LastMeasured *time.Time
 }
