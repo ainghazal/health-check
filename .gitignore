@@ -1,4 +1,6 @@
 # Binaries for programs and plugins
+health-check
+
 *.exe
 *.exe~
 *.dll
@@ -13,3 +15,6 @@
 
 # Dependency directories (remove the comment below to include it)
 # vendor/
+
+# Data folder
+data/*
