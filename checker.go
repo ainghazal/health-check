@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/netip"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ainghazal/torii/vpn"
@@ -30,6 +31,9 @@ var (
 	ErrNotReady      = errors.New("not ready")
 	ErrBadBase64Blob = errors.New("wrong base64 encoding")
 )
+
+type empty struct{}
+type semaphore chan empty
 
 // Checker is a VPN checker with aspirations of universality.
 type Checker interface {
@@ -68,85 +72,104 @@ func (v *VPNChecker) Run(mCh chan *Measurement) error {
 	endpoints := v.Provider.Endpoints()
 	log.Println("got", len(endpoints), "endpoints")
 
-	// FIXME check for boundary
-	// TODO split this monster function -------------------------
-	for i := 0; i < maxEndpointsToTest; i++ {
-		func() {
-			m := &Measurement{
-				Timestamp: time.Now(),
-				Healthy:   false,
-			}
-			endp := endpoints[i]
-			endpAddr := fmt.Sprintf("%s:%s", endp.IP, endp.Port)
+	sem := make(semaphore, maxConcurrentCheckers)
+	wg := new(sync.WaitGroup)
 
-			addr := net.TCPAddrFromAddrPort(netip.MustParseAddrPort(endpAddr))
-			m.Addr = addr
-			m.Transport = endp.Transport
-
-			// TODO: refactor auth extraction
-			auth := v.Provider.Auth()
-			ca, _ := extractBase64Blob(auth.Ca)
-			cert, _ := extractBase64Blob(auth.Cert)
-			key, _ := extractBase64Blob(auth.Key)
-
-			// this is inconvenient and bad ux. Options should
-			// accept a string.
-			optProto, err := protoToInt(endp.Transport)
-			if err != nil {
-				log.Println("ERROR:", err)
-				return
-			}
-
-			opt := &minivpn.Options{
-				Remote: endp.IP,
-				Proto:  optProto,
-				Port:   endp.Port,
-				Cipher: "AES-256-GCM",
-				Auth:   "SHA512",
-				Ca:     ca,
-				Cert:   cert,
-				Key:    key,
-			}
-
-			log.Printf("Measuring endpoint: %d/%d", i+1, len(endpoints))
-
-			// TODO split, get pinger + cancel
-
-			ctx := context.Background()
-			ctxDialTimeout, cancelDial := context.WithTimeout(ctx, time.Duration(time.Second*5))
-			defer cancelDial()
-			tunnel := minivpn.NewClientFromOptions(opt)
-
-			// FIXME this is not being honored by client
-			tunnel.Log = &nullLogger{}
-			if err := tunnel.Start(ctxDialTimeout); err != nil {
-				log.Println(err)
-				m.Healthy = false
-				mCh <- m
-				return
-			}
-			pinger := ping.New("1.1.1.1", tunnel)
-			pinger.Count = 3
-			pinger.Silent = true
-
-			ctxTimeout, cancelPing := context.WithTimeout(ctx, time.Duration(time.Second*4))
-			defer cancelPing()
-
-			if err := pinger.Run(ctxTimeout); err != nil {
-				log.Println("err on ping", err)
-				m.Healthy = false
-				mCh <- m
-				return
-			}
-			loss := pinger.Statistics().PacketLoss
-			if loss < healthThresholdForPingLoss {
-				m.Healthy = true
-			}
-			mCh <- m
-
-		}()
+	var max int
+	switch maxEndpointsToTest {
+	case -1:
+		max = len(endpoints)
+	default:
+		max = maxEndpointsToTest
 	}
+	if max > len(endpoints) {
+		max = len(endpoints)
+	}
+	for i := 0; i < max; i++ {
+		sem <- empty{}
+		wg.Add(1)
+		log.Printf("Measuring endpoint: %d/%d", i+1, len(endpoints))
+		go checkSingleEndpoint(wg, sem, mCh, endpoints[i], v.Provider.Auth())
+	}
+	wg.Wait()
 	return nil
+}
+
+func checkSingleEndpoint(wg *sync.WaitGroup, sem semaphore, mCh chan *Measurement, endp *vpn.Endpoint, auth vpn.AuthDetails) {
+	defer wg.Done()
+	defer func() { <-sem }()
+	if endp.Obfuscation != "none" {
+		return
+	}
+
+	m := &Measurement{
+		Timestamp: time.Now(),
+		Healthy:   false,
+	}
+	endpAddr := fmt.Sprintf("%s:%s", endp.IP, endp.Port)
+
+	addr := net.TCPAddrFromAddrPort(netip.MustParseAddrPort(endpAddr))
+	m.Addr = addr
+	m.Transport = endp.Transport
+
+	// TODO: refactor auth extraction
+	ca, _ := extractBase64Blob(auth.Ca)
+	cert, _ := extractBase64Blob(auth.Cert)
+	key, _ := extractBase64Blob(auth.Key)
+
+	// this is inconvenient and bad ux. Options should
+	// accept a string.
+	optProto, err := protoToInt(endp.Transport)
+	if err != nil {
+		log.Println("ERROR:", err)
+		return
+	}
+
+	opt := &minivpn.Options{
+		Remote: endp.IP,
+		Proto:  optProto,
+		Port:   endp.Port,
+		Cipher: "AES-256-GCM",
+		Auth:   "SHA512",
+		Ca:     ca,
+		Cert:   cert,
+		Key:    key,
+	}
+
+	// TODO split, get pinger + cancel
+
+	ctx := context.Background()
+	ctxDialTimeout, cancelDial := context.WithTimeout(ctx, time.Duration(time.Second*5))
+	defer cancelDial()
+	tunnel := minivpn.NewClientFromOptions(opt)
+
+	// FIXME this is not being honored by client
+	tunnel.Log = &nullLogger{}
+	if err := tunnel.Start(ctxDialTimeout); err != nil {
+		log.Println(err)
+		m.Healthy = false
+		mCh <- m
+		return
+	}
+	pinger := ping.New("1.1.1.1", tunnel)
+	pinger.Count = 3
+	pinger.Silent = true
+
+	ctxTimeout, cancelPing := context.WithTimeout(ctx, time.Duration(time.Second*4))
+	defer cancelPing()
+
+	if err := pinger.Run(ctxTimeout); err != nil {
+		log.Println("err on ping", err)
+		m.Healthy = false
+		mCh <- m
+		return
+	}
+	loss := pinger.Statistics().PacketLoss
+	if loss < healthThresholdForPingLoss {
+		m.Healthy = true
+	}
+	mCh <- m
+
 }
 
 var _ Checker = &VPNChecker{}

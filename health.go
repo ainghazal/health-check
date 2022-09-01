@@ -90,6 +90,14 @@ func NewMeasurementBatch() *MeasurementBatch {
 	return mb
 }
 
+func (mb *MeasurementBatch) Measurements() []*Measurement {
+	ms := []*Measurement{}
+	for _, m := range mb.healthMap {
+		ms = append(ms, m)
+	}
+	return ms
+}
+
 // Healthy returns true if the passed address is known to be healthy. It will
 // return an error if we don't have that measurement.
 func (mb *MeasurementBatch) Healthy(addr net.Addr, transport string) (bool, error) {
