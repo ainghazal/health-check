@@ -1,7 +1,11 @@
 package main
 
 import (
+	"encoding/json"
+	"log"
+	"net"
 	"net/http"
+	"net/netip"
 	"os"
 
 	"github.com/ainghazal/torii/vpn"
@@ -22,6 +26,104 @@ var healthServiceMap = make(map[string]*HealthService)
 
 var enabledProviders = []string{"riseup"}
 
+type httpHandler func(http.ResponseWriter, *http.Request)
+
+type result struct {
+	Action string `json:"action"`
+	Result bool   `json:"result"`
+}
+
+func healthQueryHandlerJSON(phs map[string]*HealthService, provider string) httpHandler {
+	return func(w http.ResponseWriter, r *http.Request) {
+		hs, ok := phs[provider]
+		if !ok {
+			http.Error(w, "unknown provider", http.StatusBadRequest)
+			return
+		}
+		addrStr := getParam("addr", r)
+		transport := getParam("tr", r)
+		if addrStr == "" {
+			http.Error(w, "missing param", http.StatusBadRequest)
+			return
+		}
+		addr := net.TCPAddrFromAddrPort(netip.MustParseAddrPort(addrStr))
+		isHealthy, err := hs.Healthy(addr, transport)
+		if err != nil {
+			log.Println("ERR", err.Error())
+			http.Error(w, "dunno rick", http.StatusInternalServerError)
+			return
+		}
+		res := []*result{&result{
+			Action: "healthy",
+			Result: isHealthy,
+		},
+		}
+		json.NewEncoder(w).Encode(res)
+	}
+}
+
+// PoC for a general view of status (text/plain)
+func healthSummaryHandlerText(phs map[string]*HealthService, provider string) httpHandler {
+	return func(w http.ResponseWriter, r *http.Request) {
+
+		// loop
+		/*
+		 addr := net.TCPAddrFromAddrPort(netip.MustParseAddrPort(addrStr))
+		 isHealthy, err := hs.Healthy(addr, transport)
+		 if err != nil {
+		 	log.Println("ERR", err.Error())
+		 	http.Error(w, "dunno rick", http.StatusInternalServerError)
+		 	return
+		 }
+		 res := []*result{&result{
+		 	Action: "healthy",
+		 	Result: isHealthy,
+		 },
+		 }
+		 json.NewEncoder(w).Encode(res)
+		*/
+	}
+}
+
+// User facing status (html)
+func healthQueryHandlerHTML(phs map[string]*HealthService, provider string) httpHandler {
+	return func(w http.ResponseWriter, r *http.Request) {
+		hs, ok := phs[provider]
+		if !ok {
+			http.Error(w, "unknown provider", http.StatusBadRequest)
+			return
+		}
+		// ...
+		addrStr := getQueryParam("addr", r)
+		transport := getQueryParam("tr", r)
+		if addrStr == "" {
+			http.Error(w, "missing param", http.StatusBadRequest)
+			return
+		}
+		addr := net.TCPAddrFromAddrPort(netip.MustParseAddrPort(addrStr))
+		isHealthy, err := hs.Healthy(addr, transport)
+		if err != nil {
+			log.Println("ERR", err.Error())
+			http.Error(w, "dunno rick", http.StatusInternalServerError)
+			return
+		}
+		res := []*result{&result{
+			Action: "healthy",
+			Result: isHealthy,
+		},
+		}
+		json.NewEncoder(w).Encode(res)
+	}
+}
+
+func getParam(param string, r *http.Request) string {
+	return mux.Vars(r)[param]
+}
+
+func getQueryParam(param string, r *http.Request) string {
+	return r.URL.Query().Get(param)
+}
+
 func main() {
 	var log = logrus.New()
 	log.Formatter = new(logrus.TextFormatter)
@@ -38,6 +140,7 @@ func main() {
 	log.Println("Starting health-check service")
 	log.Println("Bootstrapping providers")
 
+	phs := make(map[string]*HealthService)
 	for name, provider := range vpn.Providers {
 		if hasItem(enabledProviders, name) {
 			hs := &HealthService{
@@ -47,11 +150,15 @@ func main() {
 				},
 			}
 			hs.Start()
+			phs[name] = hs
 		}
 	}
 
 	r := mux.NewRouter().StrictSlash(false)
 	r.HandleFunc("/", homeHandler)
+	r.HandleFunc("/riseup/status/json", healthQueryHandlerJSON(phs, "riseup")).Queries("addr", "{addr}").Queries("tr", "{tr}")
+	r.HandleFunc("/riseup/summary", healthSummaryHandlerText(phs, "riseup"))
+	r.HandleFunc("/riseup/status", healthQueryHandlerHTML(phs, "riseup"))
 	log.Fatal(http.ListenAndServe(listeningPort, r))
 }
 

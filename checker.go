@@ -27,9 +27,6 @@ const (
 )
 
 var (
-	maxEndpointsToTest = 2   // DEBUG, change-me for release
-	healthThreshold    = 0.8 // below this loss rate, it's healthy
-
 	ErrNotReady      = errors.New("not ready")
 	ErrBadBase64Blob = errors.New("wrong base64 encoding")
 )
@@ -60,27 +57,6 @@ func (v *VPNChecker) ProviderName() string {
 	return v.Provider.Name()
 }
 
-// TODO move to minivpn/ extras -------------------------
-type nullLogger struct{}
-
-func (n *nullLogger) Info(string) {}
-
-func (n *nullLogger) Infof(string, ...interface{}) {}
-
-func (n *nullLogger) Debug(string) {}
-
-func (n *nullLogger) Debugf(string, ...interface{}) {}
-
-func (n *nullLogger) Warn(string) {}
-
-func (n *nullLogger) Warnf(string, ...interface{}) {}
-
-func (n *nullLogger) Error(string) {}
-
-func (n *nullLogger) Errorf(string, ...interface{}) {}
-
-// -----------------------------------------------------
-
 func (v *VPNChecker) Run(mCh chan *Measurement) error {
 	defer func() {
 		close(mCh)
@@ -92,27 +68,38 @@ func (v *VPNChecker) Run(mCh chan *Measurement) error {
 	endpoints := v.Provider.Endpoints()
 	log.Println("got", len(endpoints), "endpoints")
 
-	var m *Measurement
-
 	// FIXME check for boundary
 	// TODO split this monster function -------------------------
-
 	for i := 0; i < maxEndpointsToTest; i++ {
 		func() {
-			m = &Measurement{}
+			m := &Measurement{
+				Timestamp: time.Now(),
+				Healthy:   false,
+			}
 			endp := endpoints[i]
 			endpAddr := fmt.Sprintf("%s:%s", endp.IP, endp.Port)
 
 			addr := net.TCPAddrFromAddrPort(netip.MustParseAddrPort(endpAddr))
 			m.Addr = addr
-			auth := v.Provider.Auth()
+			m.Transport = endp.Transport
 
+			// TODO: refactor auth extraction
+			auth := v.Provider.Auth()
 			ca, _ := extractBase64Blob(auth.Ca)
 			cert, _ := extractBase64Blob(auth.Cert)
 			key, _ := extractBase64Blob(auth.Key)
 
+			// this is inconvenient and bad ux. Options should
+			// accept a string.
+			optProto, err := protoToInt(endp.Transport)
+			if err != nil {
+				log.Println("ERROR:", err)
+				return
+			}
+
 			opt := &minivpn.Options{
 				Remote: endp.IP,
+				Proto:  optProto,
 				Port:   endp.Port,
 				Cipher: "AES-256-GCM",
 				Auth:   "SHA512",
@@ -120,41 +107,78 @@ func (v *VPNChecker) Run(mCh chan *Measurement) error {
 				Cert:   cert,
 				Key:    key,
 			}
+
+			log.Printf("Measuring endpoint: %d/%d", i+1, len(endpoints))
+
+			// TODO split, get pinger + cancel
+
 			ctx := context.Background()
+			ctxDialTimeout, cancelDial := context.WithTimeout(ctx, time.Duration(time.Second*5))
+			defer cancelDial()
 			tunnel := minivpn.NewClientFromOptions(opt)
 
 			// FIXME this is not being honored by client
 			tunnel.Log = &nullLogger{}
-			err := tunnel.Start(ctx)
-			if err != nil {
+			if err := tunnel.Start(ctxDialTimeout); err != nil {
 				log.Println(err)
 				m.Healthy = false
 				mCh <- m
 				return
 			}
 			pinger := ping.New("1.1.1.1", tunnel)
-			pinger.Count = 5
+			pinger.Count = 3
 			pinger.Silent = true
 
-			ctxTimeout, cancel := context.WithTimeout(ctx, time.Duration(time.Second*7))
-			defer cancel()
-			err = pinger.Run(ctxTimeout)
-			if err != nil {
+			ctxTimeout, cancelPing := context.WithTimeout(ctx, time.Duration(time.Second*4))
+			defer cancelPing()
+
+			if err := pinger.Run(ctxTimeout); err != nil {
 				log.Println("err on ping", err)
 				m.Healthy = false
 				mCh <- m
 				return
 			}
-			pinger.PrintStats()
-			// TODO actually decide based on the threshold here!!!
-			m.Healthy = true
+			loss := pinger.Statistics().PacketLoss
+			if loss < healthThresholdForPingLoss {
+				m.Healthy = true
+			}
 			mCh <- m
+
 		}()
 	}
 	return nil
 }
 
 var _ Checker = &VPNChecker{}
+
+func singlePing(opt *minivpn.Options) *ping.Pinger {
+	/*
+	 ctx := context.Background()
+	 ctxDialTimeout, cancelDial := context.WithTimeout(ctx, time.Duration(time.Second*5))
+	 defer cancelDial()
+	 tunnel := minivpn.NewClientFromOptions(opt)
+	*/
+
+	/*
+	 // FIXME this is not being honored by client
+	 tunnel.Log = &nullLogger{}
+	 if err := tunnel.Start(ctxDialTimeout); err != nil {
+	 	log.Println(err)
+	 	m.Healthy = false
+	 	mCh <- m
+	 	return
+	 }
+	 pinger := ping.New("1.1.1.1", tunnel)
+	 pinger.Count = 3
+	 pinger.Silent = true
+	*/
+
+	/*
+	 ctxTimeout, cancelPing := context.WithTimeout(ctx, time.Duration(time.Second*4))
+	 defer cancelPing()
+	*/
+	return nil
+}
 
 func extractBase64Blob(val string) ([]byte, error) {
 	s := strings.TrimPrefix(val, "base64:")
@@ -169,4 +193,17 @@ func extractBase64Blob(val string) ([]byte, error) {
 		return nil, nil
 	}
 	return dec, nil
+}
+
+// TODO this should be fixed in minivpn
+// https://github.com/ooni/minivpn/issues/25
+func protoToInt(p string) (int, error) {
+	switch p {
+	case "udp":
+		return minivpn.UDPMode, nil
+	case "tcp":
+		return minivpn.TCPMode, nil
+	default:
+		return -1, fmt.Errorf("unknown proto: %s", p)
+	}
 }
