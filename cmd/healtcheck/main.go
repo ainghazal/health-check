@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"os"
 
+	health "github.com/ainghazal/health-check"
 	"github.com/ainghazal/torii/vpn"
 	"github.com/gorilla/mux"
 	"github.com/sirupsen/logrus"
@@ -18,7 +19,7 @@ func homeHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(msgHomeStr))
 }
 
-var healthServiceMap = make(map[string]*HealthService)
+var healthServiceMap = make(map[string]*health.HealthService)
 
 var enabledProviders = []string{"riseup"}
 
@@ -38,25 +39,24 @@ func main() {
 	log.Println("Starting health-check service")
 	log.Println("Bootstrapping providers")
 
-	phs := make(map[string]*HealthService)
 	for name, provider := range vpn.Providers {
 		if isEnabledProvider(name) {
-			hs := &HealthService{
+			hs := &health.HealthService{
 				Name: name,
-				Checker: &VPNChecker{
+				Checker: &health.VPNChecker{
 					Provider: provider,
 				},
 			}
 			hs.Start()
-			phs[name] = hs
+			healthServiceMap[name] = hs
 		}
 	}
 
 	r := mux.NewRouter().StrictSlash(false)
 	r.HandleFunc("/", homeHandler)
-	r.HandleFunc("/riseup/status/json", HealthQueryHandlerJSON(phs, "riseup")).Queries("addr", "{addr}").Queries("tr", "{tr}")
-	r.HandleFunc("/riseup/summary", HealthSummaryHandlerText(phs, "riseup"))
-	r.HandleFunc("/riseup/status", HealthQueryHandlerHTML(phs, "riseup"))
+	r.HandleFunc("/riseup/status/json", health.HealthQueryHandlerJSON(healthServiceMap, "riseup")).Queries("addr", "{addr}").Queries("tr", "{tr}")
+	r.HandleFunc("/riseup/summary", health.HealthSummaryHandlerText(healthServiceMap, "riseup"))
+	r.HandleFunc("/riseup/status", health.HealthQueryHandlerHTML(healthServiceMap, "riseup"))
 	log.Fatal(http.ListenAndServe(listeningPort, r))
 }
 

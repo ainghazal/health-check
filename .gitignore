@@ -1,11 +1,16 @@
 # Binaries for programs and plugins
 health-check
+health
 
 *.exe
 *.exe~
 *.dll
 *.so
 *.dylib
+
+# swap files
+*.swp
+*.swo
 
 # Test binary, built with `go test -c`
 *.test

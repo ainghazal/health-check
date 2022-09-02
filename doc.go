@@ -1,6 +1,6 @@
-package main
+package health
 
 //
-// Package health-check schedules periodical connectivity tests
+// Package health schedules periodical connectivity tests
 // to assess the health status of a given service.
 //

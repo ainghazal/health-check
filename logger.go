@@ -1,4 +1,4 @@
-package main
+package health
 
 // TODO can move to minivpn/ extras https://github.com/ooni/minivpn/issues/24
 
